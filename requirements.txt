@@ -1,0 +1,6 @@
+kagglehub
+scikit-learn
+sentence-transformers
+langchain
+langchain-chroma
+langchain-ollama
