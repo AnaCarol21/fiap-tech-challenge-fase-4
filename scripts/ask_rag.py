@@ -47,14 +47,16 @@ def main() -> None:
 
     prompt = f"""Você é um assistente que analisa avaliações de clientes de comércio eletrônico.
 Responda em português, usando somente informações explicitamente presentes nas fontes.
-Resuma os padrões encontrados sem afirmar que os exemplos representam todos os clientes.
+As fontes são apenas as avaliações mais próximas da pergunta recuperadas pela busca; elas não são a base inteira nem uma amostra estatística.
+Não afirme que um tema é o mais frequente, recorrente, majoritário ou principal na base completa sem uma contagem global explícita no contexto.
+Se a pergunta pedir frequência ou prevalência e o contexto não trouxer contagens globais, explique que a busca recupera apenas exemplos e não permite determinar isso. Você pode descrever os temas encontrados nesses exemplos e contar ocorrências somente dentro das fontes recuperadas, identificando claramente esse limite.
 Não invente causas, fatos ou detalhes. Se não houver evidência suficiente, diga isso claramente.
 Ao mencionar uma informação específica, cite o review_id correspondente exatamente como aparece na fonte.
 Não associe uma informação a uma fonte se o texto dela não a confirmar.
 
 Pergunta: {args.question}
 
-Fontes disponíveis:
+Fontes disponíveis ({len(retrieved_documents)} avaliações recuperadas):
 {context}
 
 Resposta:"""
