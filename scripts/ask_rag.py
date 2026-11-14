@@ -10,13 +10,14 @@ ASSIGNMENTS = ROOT / "data" / "processed" / "nmf_topic_assignments_score_1_2.csv
 COLLECTION = "olist_reviews"
 EMBEDDING_MODEL = "qwen3-embedding:0.6b"
 CHAT_MODEL = "qwen3:4b"
+DEFAULT_MAX_DISTANCE = 0.80
 LABELS = {
     0: "não recebido / não chegou", 1: "não recebido / não chegou",
     2: "não recebido / não chegou", 3: "não recebido / não chegou",
     4: "pedido incompleto (faltam itens)",
     5: "produto não recebido ou produto diferente",
     6: "atraso ou demora na entrega",
-    7: "insatisfação geral, qualidade ou atendimento",
+    7: "insatisfação e recomendação em avaliações mistas",
     8: "produto com defeito, peça faltando ou produto divergente",
     9: "pedido de reembolso",
 }
@@ -39,8 +40,12 @@ def relevant_topic_ids(question):
     q = normalized(question)
     if any(word in q for word in ("entrega", "atraso", "prazo", "chegou")):
         return {0, 1, 2, 3, 6}
-    if any(word in q for word in ("qualidade", "defeito", "produto")):
-        return {5, 7, 8}
+    if any(word in q for word in (
+        "qualidade", "defeito", "peca faltando", "quebrado", "durabilidade",
+    )):
+        return {8}
+    if any(word in q for word in ("produto", "errado", "diferente")):
+        return {5, 8}
     if any(word in q for word in ("reembolso", "devolucao", "estorno")):
         return {9}
     return set(range(10))
@@ -104,9 +109,24 @@ def main():
     parser = argparse.ArgumentParser(description="Responde usando avaliações da Olist.")
     parser.add_argument("question", help="Pergunta sobre as avaliações")
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument(
+        "--max-distance",
+        type=float,
+        default=DEFAULT_MAX_DISTANCE,
+        help="Distância máxima Chroma para aceitar uma fonte (padrão: 0.80)",
+    )
     args = parser.parse_args()
+    if args.top_k < 1:
+        parser.error("--top-k precisa ser maior que zero")
+    if args.max_distance <= 0:
+        parser.error("--max-distance precisa ser maior que zero")
 
-    use_topics = needs_topics(args.question)
+    question_text = normalized(args.question)
+    asks_for_unavailable_identity = any(term in question_text for term in (
+        "nome do cliente", "endereco do cliente", "telefone do cliente",
+        "cpf", "quem escreveu", "quem fez a avaliacao",
+    ))
+    use_topics = needs_topics(args.question) and not asks_for_unavailable_identity
     analysis = load_topic_analysis(args.question) if use_topics else None
     store = Chroma(
         collection_name=COLLECTION,
@@ -116,20 +136,36 @@ def main():
     search = {"k": args.top_k}
     if use_topics:
         search["filter"] = {"review_score": {"$lte": 2}}
-    docs = store.similarity_search(args.question, **search)
-    if not docs:
-        print("Nenhuma avaliação relevante foi encontrada no índice.")
+    candidates = store.similarity_search_with_score(args.question, **search)
+    scored_docs = [
+        (doc, float(distance))
+        for doc, distance in candidates
+        if float(distance) <= args.max_distance
+    ]
+    docs = [doc for doc, _ in scored_docs]
+    if not docs and not analysis:
+        print(
+            f"Nenhuma fonte ficou dentro do limite de distância "
+            f"{args.max_distance:.2f}. Não há evidência suficiente para responder."
+        )
         return
 
     sources = []
-    for i, doc in enumerate(docs, 1):
+    for i, (doc, distance) in enumerate(scored_docs, 1):
         meta = doc.metadata
         sources.append(
-            f"Fonte recuperada {i} | review_id: {meta.get('review_id')} | nota: "
+            f"Fonte recuperada {i} | distância: {distance:.4f} "
+            f"| review_id: {meta.get('review_id')} | nota: "
             f"{meta.get('review_score')} | data: {meta.get('review_creation_date')}\n"
             f"{doc.page_content}"
         )
     context = "\n\n---\n\n".join(sources)
+    if not context:
+        context = (
+            "A busca semântica não encontrou comentários dentro do limite de "
+            f"distância {args.max_distance:.2f}. Se houver análise NMF acima, "
+            "ela contém apenas seus próprios exemplos representativos."
+        )
     if analysis:
         aggregate = "\n\nAnálise NMF e exemplos representativos:\n" + analysis
         instruction = (
@@ -171,11 +207,14 @@ Resposta:"""
         print(f"Explicação gerada pelo modelo ({CHAT_MODEL}):\n{response.content}\n")
     else:
         print(f"Resposta ({CHAT_MODEL}):\n{response.content}\n")
-    print("Fontes recuperadas por similaridade:")
-    for i, doc in enumerate(docs, 1):
+    print(f"Fontes recuperadas por similaridade (distância <= {args.max_distance:.2f}):")
+    if not scored_docs:
+        print("   Nenhuma; foram usados os exemplos representativos da análise NMF.")
+    for i, (doc, distance) in enumerate(scored_docs, 1):
         meta = doc.metadata
-        print(f"\nFonte {i} | review_id: {meta.get('review_id')} | nota: "
-              f"{meta.get('review_score')} | data: {meta.get('review_creation_date')}")
+        print(f"\nFonte {i} | distância: {distance:.4f} "
+              f"| review_id: {meta.get('review_id')} | nota: {meta.get('review_score')} "
+              f"| data: {meta.get('review_creation_date')}")
         print(f"   {doc.page_content}")
 
 
