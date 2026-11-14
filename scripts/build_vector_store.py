@@ -45,7 +45,20 @@ def main() -> None:
         embedding_function=embeddings,
     )
 
-    existing_ids = set(vector_store.get().get("ids", []))
+    existing_ids = set()
+    page_size = 1000
+    offset = 0
+    while True:
+        page = vector_store.get(
+            limit=page_size,
+            offset=offset,
+            include=["metadatas"],
+        )
+        page_ids = page.get("ids", [])
+        existing_ids.update(page_ids)
+        if len(page_ids) < page_size:
+            break
+        offset += page_size
     new_documents = [
         document for document in documents
         if document.metadata["review_id"] not in existing_ids
