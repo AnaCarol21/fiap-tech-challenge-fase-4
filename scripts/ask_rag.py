@@ -150,18 +150,20 @@ def load_positive_topic_analysis(question):
     return "\n".join(lines)
 
 def relevant_topic_ids(question):
+    """Combina os tópicos de todos os assuntos mencionados na pergunta."""
     q = normalized(question)
+    relevant = set()
     if any(word in q for word in ("entrega", "atraso", "prazo", "chegou")):
-        return {0, 1, 2, 3, 6}
+        relevant.update({0, 1, 2, 3, 6})
     if any(word in q for word in (
         "qualidade", "defeito", "peca faltando", "quebrado", "durabilidade",
     )):
-        return {8}
+        relevant.add(8)
     if any(word in q for word in ("produto", "errado", "diferente")):
-        return {5, 8}
+        relevant.update({5, 8})
     if any(word in q for word in ("reembolso", "devolucao", "estorno")):
-        return {9}
-    return set(range(10))
+        relevant.add(9)
+    return relevant or set(range(10))
 
 
 def load_topic_analysis(question):
@@ -328,6 +330,13 @@ def retrieve_documents(store, question, analysis, positive_mode, use_topics, top
     elif use_topics:
         search["filter"] = {"review_score": {"$lte": 2}}
     search_queries = [question]
+    question_terms = normalized(question)
+    service_terms = ("atendimento", "suporte", "resposta", "contato", "email", "e-mail")
+    if use_topics and any(term in question_terms for term in service_terms):
+        search_queries.append(
+            "problemas de atendimento ao cliente, falta de resposta a emails, "
+            "dificuldade de contato e suporte da loja"
+        )
     if analysis:
         search_queries.extend(build_topic_search_queries(analysis, positive_mode))
     search_queries = list(dict.fromkeys(search_queries))
@@ -363,7 +372,7 @@ def retrieve_documents(store, question, analysis, positive_mode, use_topics, top
     return search_queries, scored_docs
 
 
-def answer_question(question, top_k, max_distance, store, verbose=False):
+def answer_question(question, top_k, max_distance, store, verbose=False, show_question=True):
     args = argparse.Namespace(
         question=question,
         top_k=top_k,
@@ -390,10 +399,15 @@ def answer_question(question, top_k, max_distance, store, verbose=False):
     )
     docs = [doc for doc, _ in scored_docs]
     if not docs and not analysis:
+        print("\n" + "=" * 72)
+        if show_question:
+            print(f"Pergunta: {args.question}\n")
+        print("RESPOSTA")
         print(
             f"Nenhuma fonte ficou dentro do limite de distância "
             f"{args.max_distance:.2f}. Não há evidência suficiente para responder."
         )
+        print("=" * 72 + "\n")
         return
 
     sources = []
@@ -416,10 +430,16 @@ def answer_question(question, top_k, max_distance, store, verbose=False):
         model_analysis = build_topic_context(analysis, positive_mode)
         aggregate = "\n\nContexto temático selecionado para a resposta:\n" + model_analysis
         instruction = (
-            "Responda diretamente em português natural, como um analista explicando os "
-            "relatos a uma pessoa. Escreva um parágrafo coeso de 3 a 5 frases, não uma "
-            "lista telegráfica de rótulos. Explique o que os clientes relatam e como os "
-            "temas se relacionam; use citações [Fonte n] ou [NMF n] junto à afirmação. "
+            "Responda em português natural, como um analista explicando os relatos a "
+            "uma pessoa. Escreva um parágrafo coeso de 2 a 4 frases, não uma lista "
+            "telegráfica. A primeira frase deve responder diretamente à pergunta em "
+            "linguagem completa e incluir a referência [NMF n] ou [Fonte n] que a "
+            "sustenta. Nunca comece por um marcador de referência. Em seguida, explique "
+            "os temas com exemplos concretos e referências junto às afirmações. "
+            "Se a pergunta abordar mais de um assunto, trate cada assunto com as "
+            "evidências correspondentes e diga quando algum deles não tiver suporte. "
+            "Não invente citações entre aspas: só use aspas quando copiar exatamente "
+            "o comentário ou exemplo citado. Prefira paráfrases naturais. "
             "Para perguntas "
             "gerais sobre principais problemas, padrões, elogios ou evidências sem tema "
             "especificado, use os temas NMF e exemplos recuperados. Se a pergunta não "
@@ -434,7 +454,8 @@ def answer_question(question, top_k, max_distance, store, verbose=False):
             "em uma seção separada, com valores e identificadores exatos. Cite cada "
             "afirmação factual com [Fonte n] quando apoiada por comentário Chroma ou "
             "[NMF n] quando apoiada por exemplo NMF; use somente números de referência "
-            "presentes no contexto. Em avaliações negativas, não trate o tópico amplo "
+            "presentes no contexto; cada fonte deve sustentar especificamente a afirmação "
+            "à qual está ligada. Em avaliações negativas, não trate o tópico amplo "
             "'insatisfação e recomendação em avaliações mistas' como um problema "
             "específico. Não amplie a descrição de um comentário além do problema "
             "que ele relata claramente, mesmo quando o rótulo NMF agrupa problemas "
@@ -482,32 +503,36 @@ Resposta:"""
         answer = retain_cited_sentences(answer)
         if not answer:
             answer = "A resposta gerada não trouxe referências válidas. Consulte as evidências detalhadas abaixo."
-    print(f"Pergunta: {args.question}\n")
-    print(f"Resposta ({CHAT_MODEL}):\n{answer}\n")
+    print("\n" + "=" * 72)
+    if show_question:
+        print(f"Pergunta: {args.question}\n")
+    print(f"RESPOSTA | {CHAT_MODEL}")
+    print(answer)
+    print("\nEVIDÊNCIAS CITADAS")
 
     cited_sources = {int(number) for number in re.findall(r"\[Fonte (\d+)\]", answer)}
     cited_nmf = {int(number) for number in re.findall(r"\[NMF (\d+)\]", answer)}
-    print("Evidências citadas na resposta:")
     printed_evidence = False
     if analysis and cited_nmf:
         for line in model_analysis.splitlines():
             match = re.match(r"Exemplo NMF (\d+) \|", line)
             if match and int(match.group(1)) in cited_nmf:
-                print(line)
+                print(f"- {line}")
                 printed_evidence = True
     for number, (doc, distance) in enumerate(scored_docs, 1):
         if number not in cited_sources:
             continue
         meta = doc.metadata
         print(
-            f"Fonte {number} | distância: {distance:.4f} | "
-            f"review_id: {meta.get('review_id')} | nota: {meta.get('review_score')} | "
-            f"data: {meta.get('review_creation_date')}"
+            f"- [Fonte {number}] nota {meta.get('review_score')} | "
+            f"data {meta.get('review_creation_date')} | "
+            f"distância {distance:.3f} | review_id {meta.get('review_id')}"
         )
-        print(f"   {doc.page_content}")
+        print(f"  {doc.page_content}")
         printed_evidence = True
     if not printed_evidence:
-        print("A síntese não citou referências válidas; use --verbose para inspecionar o contexto.")
+        print("Nenhuma referência válida foi citada. Use --verbose para inspecionar o contexto.")
+    print("=" * 72 + "\n")
 
     if verbose:
         if len(search_queries) > 1:
@@ -582,7 +607,7 @@ def main():
         if normalized(question) in {"sair", "exit", "quit"}:
             print("Encerrando.")
             break
-        answer_question(question, args.top_k, args.max_distance, store, args.verbose)
+        answer_question(question, args.top_k, args.max_distance, store, args.verbose, show_question=False)
 
 
 if __name__ == "__main__":
