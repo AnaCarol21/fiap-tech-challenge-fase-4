@@ -1,8 +1,8 @@
-question,relevant_review_ids,rationale
-"meu pedido chegou atrasado",7a92e9673e50016873420d5ef54f441e,"Relata que a compra está muito atrasada."
-"meu pedido não foi entregue",49ef8de8e52ee16303f159ce620844d9;95fa4c67912e2e46bf4ecd606e3623ee,"Relatam pedidos que não foram entregues."
-"comprei dois produtos e recebi apenas um",7791b069b631653faff166a056ca7ec2,"Relata que recebeu somente um dos dois produtos comprados."
-"recebi um produto com defeito",f91978f4a01c8e97897adb8f282833c5,"Relata que o produto veio com defeito."
-"reclamei por email sobre a entrega e não tive resposta",3f73e392e2bcf4aa6f0af7fbec6a9f1f;348bb52140cb8ab0a2ff4df1e38595b3,"Relatam ausência de resposta aos emails sobre problemas de entrega."
-"o que os clientes elogiam na experiência de compra",d616c8b2fc1e9b6e150b77e78967a4ea;0d65bf6c54e217b5ba5d38b2f4edfd0d;52300a5e6997431d0597e820015ec8ff,"Avaliações positivas sobre a experiência de compra."
-"produto de ótima qualidade",83b3283aace408f94a9fec8d43926cab,"Elogia diretamente a qualidade do produto."
+question,rationale
+meu pedido chegou atrasado,Relata atraso ou demora na entrega.
+meu pedido não foi entregue,Relata pedido ainda não entregue.
+comprei dois produtos e recebi apenas um,Relata pedido incompleto.
+recebi um produto com defeito,Relata produto com defeito.
+reclamei por email sobre a entrega e não tive resposta,Relata falta de resposta sobre entrega.
+o que os clientes elogiam na experiência de compra,Pergunta geral sobre avaliações positivas; deve usar filtro de notas 4–5 e expansão NMF.
+produto de ótima qualidade,Elogia diretamente a qualidade do produto; deve usar filtro de notas 4–5.

@@ -1,0 +1,36 @@
+question,review_id,relevant,notes
+meu pedido chegou atrasado,4066a28eefe9e750aa01ad19ab2fe494,0,Não afirma que chegou atrasado; diz que ainda não chegou.
+meu pedido chegou atrasado,4839daa67e1328de5155d092c2614d21,1,Refere que os pedidos não chegam no prazo.
+meu pedido chegou atrasado,7a92e9673e50016873420d5ef54f441e,1,Relata compra muito atrasada.
+meu pedido chegou atrasado,18039abcb5cbc7a8a0414824a3a2efec,0,"Relata não recebimento, sem afirmar atraso após a chegada."
+meu pedido chegou atrasado,aed4d3206b5f7198dcfa96d99877d6ff,0,"Relata não entrega, não atraso após a chegada."
+meu pedido não foi entregue,aed4d3206b5f7198dcfa96d99877d6ff,1,Relata pedido não entregue.
+meu pedido não foi entregue,a76939c8aadc8535391f7f2117594b86,1,Relata pedido não entregue.
+meu pedido não foi entregue,b2d976dd8ce9f84823d532c7012e8e26,1,Relata pedido não entregue até o momento.
+meu pedido não foi entregue,372a9075832d98efe0bdeab7af001209,1,Relata pedido não entregue.
+meu pedido não foi entregue,c2ed24406cd3433f432913c78396d265,1,Relata pedido não entregue.
+comprei dois produtos e recebi apenas um,7791b069b631653faff166a056ca7ec2,1,Correspondência direta: recebeu apenas um dos dois produtos.
+comprei dois produtos e recebi apenas um,45d15060fb432a746bb28ca63deca435,1,Correspondência direta.
+comprei dois produtos e recebi apenas um,9c291b4a22c80793e518a3c2ef68b3f4,1,Relata recebimento de apenas um dos dois produtos.
+comprei dois produtos e recebi apenas um,07a1d72676ab129e2be3b5714ab08a3b,1,Correspondência direta.
+comprei dois produtos e recebi apenas um,755de14c47749c8244b6337be51f9062,1,Correspondência direta.
+recebi um produto com defeito,83c4f54bd18decda21d563b5ddf5558a,1,Relata produto recebido com defeito.
+recebi um produto com defeito,db551ada5aa80d023f7529ca90bffee7,1,Relata produto com defeito.
+recebi um produto com defeito,f54cd12e380cf5ac38f2a46feaf2d34d,1,Relata produto com defeito.
+recebi um produto com defeito,374f3b13304eb84e0180744ddb2a5126,1,Relata produto recebido com defeito.
+recebi um produto com defeito,83c1973edf0d7f69fe893a3d123eb2e5,1,Relata defeito em um dos produtos.
+reclamei por email sobre a entrega e não tive resposta,3f73e392e2bcf4aa6f0af7fbec6a9f1f,1,Relata emails sem resposta sobre entrega.
+reclamei por email sobre a entrega e não tive resposta,10b125dc8adff6897f03a8605c902a61,1,"Relata email, não recebimento e falta de contato sobre entrega."
+reclamei por email sobre a entrega e não tive resposta,7e62c6edcd54ed043f17beb016fc7d31,0,Sem contexto visível ligando a falta de resposta à entrega.
+reclamei por email sobre a entrega e não tive resposta,9d9e9d372d8107fd9d2d2b8ea9b1418c,1,Relata não recebimento e emails sem resposta.
+reclamei por email sobre a entrega e não tive resposta,348bb52140cb8ab0a2ff4df1e38595b3,1,Relata emails sem resposta sobre entrega.
+o que os clientes elogiam na experiência de compra,0d65bf6c54e217b5ba5d38b2f4edfd0d,1,Elogia explicitamente a experiência de compra.
+o que os clientes elogiam na experiência de compra,dc7fbbe89a4273379144e57a73451498,1,Elogia o produto comprado.
+o que os clientes elogiam na experiência de compra,c0c3c4d7405c5273a6a3bac144cba74c,1,"Elogia entrega antecipada, aspecto da experiência de compra."
+o que os clientes elogiam na experiência de compra,f1ce1e89917fb0db7da33d458518c56b,1,Elogia rapidez da entrega.
+o que os clientes elogiam na experiência de compra,e000735e5bd3ff0d8b2a089ba14d8260,0,"Comentário genérico “bom”, sem especificar aspecto elogiado."
+produto de ótima qualidade,d0391b1d619709d21e29c2aa5a117b0d,1,Elogia qualidade do produto.
+produto de ótima qualidade,3fad103cd0208e0ba482063318eb1417,1,Elogia qualidade do produto.
+produto de ótima qualidade,6430f29aeda1fcb3c23c133b1d5e8cd0,1,Avaliação positiva de produto e recomendação.
+produto de ótima qualidade,66d0e4d167b93441765a6438633e8256,1,Elogia qualidade.
+produto de ótima qualidade,dbd0902a7c4bf354dba05bc5a68c5a96,1,Elogia qualidade.
