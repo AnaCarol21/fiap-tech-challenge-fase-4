@@ -60,6 +60,7 @@ def asks_exact_cause(question):
     return any(phrase in q for phrase in (
         "causa exata", "causa real", "motivo exato", "motivo real",
         "qual foi a causa", "qual a causa", "qual foi o motivo", "qual o motivo",
+        "qual transportadora", "que transportadora", "quem causou o atraso",
     ))
 
 
@@ -317,6 +318,49 @@ def build_topic_search_queries(analysis, positive_mode, max_topics=4):
             current_topic = None
     return list(dict.fromkeys(queries))
 
+def retrieve_documents(store, question, analysis, positive_mode, use_topics, top_k, max_distance):
+    """Aplica a recuperação do RAG: filtros, expansão NMF, corte e round-robin."""
+    search = {"k": top_k}
+    if positive_mode:
+        search["filter"] = {"review_score": {"$gte": 4}}
+    elif use_topics:
+        search["filter"] = {"review_score": {"$lte": 2}}
+    search_queries = [question]
+    if analysis:
+        search_queries.extend(build_topic_search_queries(analysis, positive_mode))
+    search_queries = list(dict.fromkeys(search_queries))
+    candidates_by_query = []
+    for search_query in search_queries:
+        candidates = store.similarity_search_with_score(search_query, **search)
+        best_for_query = {}
+        for doc, distance in candidates:
+            distance = float(distance)
+            if distance > max_distance:
+                continue
+            review_id = doc.metadata.get("review_id")
+            if review_id not in best_for_query or distance < best_for_query[review_id][1]:
+                best_for_query[review_id] = (doc, distance)
+        candidates_by_query.append(sorted(best_for_query.values(), key=lambda item: item[1]))
+    scored_docs = []
+    selected_ids = set()
+    max_candidates = max((len(items) for items in candidates_by_query), default=0)
+    for rank in range(max_candidates):
+        for query_candidates in candidates_by_query:
+            if rank >= len(query_candidates):
+                continue
+            doc, distance = query_candidates[rank]
+            review_id = doc.metadata.get("review_id")
+            if review_id in selected_ids:
+                continue
+            selected_ids.add(review_id)
+            scored_docs.append((doc, distance))
+            if len(scored_docs) >= top_k:
+                break
+        if len(scored_docs) >= top_k:
+            break
+    return search_queries, scored_docs
+
+
 def main():
     parser = argparse.ArgumentParser(description="Responde usando avaliações da Olist.")
     parser.add_argument("question", help="Pergunta sobre as avaliações")
@@ -353,50 +397,9 @@ def main():
         persist_directory=str(VECTOR_DIR),
         embedding_function=OllamaEmbeddings(model=EMBEDDING_MODEL),
     )
-    search = {"k": args.top_k}
-    if positive_mode:
-        search["filter"] = {"review_score": {"$gte": 4}}
-    elif use_topics:
-        search["filter"] = {"review_score": {"$lte": 2}}
-    search_queries = [args.question]
-    if analysis:
-        search_queries.extend(build_topic_search_queries(analysis, positive_mode))
-    search_queries = list(dict.fromkeys(search_queries))
-
-    candidates_by_query = []
-    for search_query in search_queries:
-        candidates = store.similarity_search_with_score(search_query, **search)
-        best_for_query = {}
-        for doc, distance in candidates:
-            distance = float(distance)
-            if distance > args.max_distance:
-                continue
-            review_id = doc.metadata.get("review_id")
-            if review_id not in best_for_query or distance < best_for_query[review_id][1]:
-                best_for_query[review_id] = (doc, distance)
-        candidates_by_query.append(
-            sorted(best_for_query.values(), key=lambda item: item[1])
-        )
-
-    # Round-robin across the original question and topic searches prevents one
-    # easy-to-match theme from filling the entire context window.
-    scored_docs = []
-    selected_ids = set()
-    max_candidates = max((len(items) for items in candidates_by_query), default=0)
-    for rank in range(max_candidates):
-        for query_candidates in candidates_by_query:
-            if rank >= len(query_candidates):
-                continue
-            doc, distance = query_candidates[rank]
-            review_id = doc.metadata.get("review_id")
-            if review_id in selected_ids:
-                continue
-            selected_ids.add(review_id)
-            scored_docs.append((doc, distance))
-            if len(scored_docs) >= args.top_k:
-                break
-        if len(scored_docs) >= args.top_k:
-            break
+    search_queries, scored_docs = retrieve_documents(
+        store, args.question, analysis, positive_mode, use_topics, args.top_k, args.max_distance
+    )
     docs = [doc for doc, _ in scored_docs]
     if not docs and not analysis:
         print(
