@@ -207,6 +207,49 @@ def load_topic_analysis(question):
     return "\n".join(lines)
 
 
+def build_topic_context(analysis, positive_mode, max_topics=4):
+    """Condensa os resultados NMF para fornecer contexto temático focado ao LLM."""
+    if not analysis:
+        return ""
+
+    topic_pattern = re.compile(
+        r"\nTema: (.*?) — ([\d,]+) avaliações \(([\d.]+)%\)\.\n"
+        r"(.*?)(?=\nTema: |\Z)",
+        re.S,
+    )
+    topics = []
+    for match in topic_pattern.finditer(analysis):
+        label, count_text, percent_text, details = match.groups()
+        if not positive_mode and "insatisfação e recomendação em avaliações mistas" in label.lower():
+            continue
+
+        example_match = re.search(
+            r"Exemplo representativo do tópico \d+, review_id [0-9a-f]+: (.*?)(?=\nExemplo representativo|\Z)",
+            details,
+            re.S | re.I,
+        )
+        example = " ".join(example_match.group(1).split()) if example_match else ""
+        topics.append({
+            "label": label,
+            "count": int(count_text.replace(",", "")),
+            "percent": percent_text,
+            "example": example,
+        })
+
+    topics.sort(key=lambda topic: topic["count"], reverse=True)
+    score_range = "4 ou 5" if positive_mode else "1 ou 2"
+    lines = [
+        f"Temas estimados por NMF em avaliações com nota {score_range}. "
+        "Cada avaliação foi atribuída a um tópico dominante; os rótulos são provisórios. "
+        "Os exemplos são comentários representativos, não evidência de frequência exata."
+    ]
+    for topic in topics[:max_topics]:
+        lines.append(f"Tema: {topic['label']}.")
+        if topic["example"]:
+            lines.append(f"Comentário representativo: {topic['example']}")
+    return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Responde usando avaliações da Olist.")
     parser.add_argument("question", help="Pergunta sobre as avaliações")
@@ -279,7 +322,8 @@ def main():
             "ela contém apenas seus próprios exemplos representativos."
         )
     if analysis:
-        aggregate = "\n\nAnálise NMF e exemplos representativos:\n" + analysis
+        model_analysis = build_topic_context(analysis, positive_mode)
+        aggregate = "\n\nContexto temático selecionado para a resposta:\n" + model_analysis
         instruction = (
             "Responda diretamente à pergunta em 2 a 4 frases naturais. Sintetize os "
             "principais temas concretos e explique o que os clientes relatam; não "
