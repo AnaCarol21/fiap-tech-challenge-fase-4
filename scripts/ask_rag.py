@@ -1,4 +1,4 @@
-import argparse, csv, re, unicodedata
+import argparse, csv, json, re, unicodedata
 from pathlib import Path
 from langchain_chroma import Chroma
 from langchain_ollama import ChatOllama, OllamaEmbeddings
@@ -52,8 +52,15 @@ def needs_topics(question):
 
 def asks_positive(question):
     q = normalized(question)
+    negative_positive_claim = re.search(
+        r"\b(?:nao|nunca|jamais)\b.{0,35}\b(?:elogi|valoriza|apreci|rapida|rapido|pontual|antes do prazo)\w*",
+        q,
+    )
+    if negative_positive_claim:
+        return False
     return any(term in q for term in (
         "elogi", "valoriza", "apreci", "aspectos positivos", "experiencia positiva",
+        "rapida", "rapido", "pontual", "antes do prazo", "chegou antes",
     ))
 
 
@@ -64,6 +71,75 @@ def asks_exact_cause(question):
         "qual foi a causa", "qual a causa", "qual foi o motivo", "qual o motivo",
         "qual transportadora", "que transportadora", "quem causou o atraso",
     ))
+
+
+_SCOPE_CACHE = {}
+
+
+def classify_question_scope(question):
+    """Classifica o escopo sem deixar consultas NMF desviar perguntas externas."""
+    cache_key = normalized(question)
+    if cache_key in _SCOPE_CACHE:
+        return _SCOPE_CACHE[cache_key]
+    prompt = f"""Você decide se a pergunta pertence ao escopo de um assistente que analisa avaliações de compras do e-commerce Olist.
+Considere DENTRO DO ESCOPO perguntas gerais sobre avaliações, comentários, reclamações, padrões, evidências e elogios dos clientes da base, mesmo quando a pergunta não repete a palavra Olist.
+Considere FORA DO ESCOPO quando a pergunta mencionar claramente outro assunto, como mercado de ações, filmes, celebridades, saúde ou previsão do tempo.
+Não responda à pergunta. Retorne somente JSON válido no formato {{\"in_scope\": true}} ou {{\"in_scope\": false}}.
+Pergunta: {question}"""
+    try:
+        response = ChatOllama(
+            model=CHAT_MODEL,
+            temperature=0,
+            reasoning=False,
+        ).invoke(prompt)
+        result = json.loads(response.content)
+        value = result.get("in_scope")
+        if isinstance(value, bool):
+            _SCOPE_CACHE[cache_key] = value
+            return value
+        if isinstance(value, str):
+            normalized_value = normalized(value)
+            if normalized_value in {"true", "sim", "dentro", "in_scope"}:
+                _SCOPE_CACHE[cache_key] = True
+                return True
+            if normalized_value in {"false", "nao", "fora", "out_of_scope"}:
+                _SCOPE_CACHE[cache_key] = False
+                return False
+    except Exception:
+        pass
+
+    # Fallback for generic challenge questions if the local classifier response
+    # is malformed or incomplete. Clearly named external domains remain excluded.
+    q = normalized(question)
+    external_topics = (
+        "mercado de acoes", "bolsa de valores", "filme", "cinema", "oppenheimer",
+        "celebridade", "previsao do tempo", "clima", "saude", "medicamento",
+        "politica", "futebol",
+    )
+    if any(term in q for term in external_topics):
+        _SCOPE_CACHE[cache_key] = False
+        return False
+    review_topics = (
+        "coment", "avaliac", "cliente", "consumidor", "compra", "pedido", "entrega",
+        "produto", "loja", "vendedor", "frete", "reembolso", "prazo", "atendimento",
+        "evidencia", "insight", "principais problema", "padrao", "reclamac", "insatisf",
+    )
+    if any(term in q for term in review_topics):
+        _SCOPE_CACHE[cache_key] = True
+        return True
+    return None
+
+
+def print_out_of_scope(question, show_question):
+    print("\n" + "=" * 72)
+    if show_question:
+        print(f"Pergunta: {question}\n")
+    print("RESPOSTA")
+    print(
+        "Este assistente responde perguntas sobre avaliações de compras da Olist. "
+        "A pergunta apresentada está fora desse escopo."
+    )
+    print("=" * 72 + "\n")
 
 
 def relevant_positive_topic_ids(question):
@@ -231,16 +307,24 @@ def remove_invalid_evidence_refs(text, source_count, nmf_count):
 
 
 def retain_cited_sentences(text):
-    # Repair missing spaces between model-generated sentences before filtering.
+    # Keep cited claims and explicit abstentions, even when they have no citation.
+    abstention_phrases = (
+        "nao ha evidencia", "nao existe evidencia", "nao encontrei evidencia",
+        "evidencias insuficientes", "evidencia insuficiente", "informacao insuficiente",
+        "nao e possivel responder", "nao e possivel confirmar", "fora do escopo",
+    )
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.I | re.S)
     text = re.sub(r"([.!?])(?=[A-ZÁÉÍÓÚÂÊÔÃÕÇ])", r"\1 ", text)
     sentences = re.split(r"(?<=[.!?])\s+|\n+", text.strip())
-    cited = [
-        sentence.strip()
-        for sentence in sentences
-        if re.search(r"\[(?:Fonte|NMF)\s+\d+\]", sentence, re.I)
-    ]
-    return " ".join(cited)
-
+    retained = []
+    for sentence in sentences:
+        cleaned = sentence.strip()
+        normalized_sentence = normalized(cleaned)
+        if re.search(r"\[(?:Fonte|NMF)\s+\d+\]", cleaned, re.I) or any(
+            phrase in normalized_sentence for phrase in abstention_phrases
+        ):
+            retained.append(cleaned)
+    return " ".join(retained)
 
 def soften_evidence_language(text):
     endings = {"o": "o", "a": "a", "os": "os", "as": "as"}
@@ -390,6 +474,16 @@ def answer_question(question, top_k, max_distance, store, verbose=False, show_qu
         and not asks_for_unavailable_identity
         and not positive_mode
     )
+    if positive_mode or use_topics:
+        in_scope = classify_question_scope(args.question)
+        if in_scope is False:
+            print_out_of_scope(args.question, show_question)
+            return
+        if in_scope is None:
+            # If scope cannot be established, retain only the original semantic search;
+            # do not let generic NMF expansions manufacture context for an unknown topic.
+            positive_mode = False
+            use_topics = False
     if positive_mode:
         analysis = load_positive_topic_analysis(args.question)
     else:
@@ -612,3 +706,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
