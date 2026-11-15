@@ -7,6 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 VECTOR_DIR = ROOT / "data" / "vector_db" / "olist_reviews"
 DETAILS = ROOT / "data" / "processed" / "nmf_topic_details_score_1_2.csv"
 ASSIGNMENTS = ROOT / "data" / "processed" / "nmf_topic_assignments_score_1_2.csv"
+POSITIVE_DETAILS = ROOT / "data" / "processed" / "nmf_topic_details_score_4_5.csv"
+POSITIVE_ASSIGNMENTS = ROOT / "data" / "processed" / "nmf_topic_assignments_score_4_5.csv"
 COLLECTION = "olist_reviews"
 EMBEDDING_MODEL = "qwen3-embedding:0.6b"
 CHAT_MODEL = "qwen3:4b"
@@ -28,6 +30,16 @@ def normalized(text):
     return "".join(c for c in decomposed if not unicodedata.combining(c))
 
 
+def remove_review_ids(text):
+    text = re.sub(
+        r"\s*\(?\s*review_id\s*:\s*[0-9a-f]{32}\s*\)?", "", text, flags=re.I
+    )
+    text = re.sub(
+        r"\s*\(?\s*review_id\s+[0-9a-f]{32}\s*\)?", "", text, flags=re.I
+    )
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
 def needs_topics(question):
     q = normalized(question)
     return any(word in q for word in (
@@ -35,6 +47,96 @@ def needs_topics(question):
         "mais aparecem", "recorrente", "insatisfeit", "reclamac",
     ))
 
+
+def asks_positive(question):
+    q = normalized(question)
+    return any(term in q for term in (
+        "elogi", "valoriza", "apreci", "aspectos positivos", "experiencia positiva",
+    ))
+
+
+def relevant_positive_topic_ids(question):
+    q = normalized(question)
+    if any(term in q for term in ("entrega", "prazo", "rapida", "rapido", "pontual")):
+        return {2, 5}
+    if any(term in q for term in ("qualidade", "defeito")):
+        return {8}
+    if any(term in q for term in ("recomendo", "recomend", "indicaria")):
+        return {3, 9}
+    return set(range(10))
+
+
+def load_positive_topic_analysis(question):
+    if not POSITIVE_DETAILS.exists():
+        return None
+    topics = {}
+    with POSITIVE_DETAILS.open(encoding="utf-8-sig", newline="") as source:
+        for row in csv.DictReader(source):
+            if int(row["n_topics"]) == 10:
+                topics[int(row["topic_id"])] = row
+    if len(topics) != 10:
+        return None
+
+    positive_labels = {
+        0: "elogios gerais: bom",
+        1: "elogios gerais: ótimo",
+        2: "entrega antes do prazo",
+        3: "recomendação do produto ou da loja",
+        4: "elogio geral: excelente",
+        5: "entrega rápida",
+        6: "compra sem problemas / tudo certo",
+        7: "avaliações positivas variadas sobre o produto",
+        8: "qualidade do produto",
+        9: "recomendação e rapidez (tema misto)",
+    }
+    relevant = relevant_positive_topic_ids(question)
+    grouped = {}
+    for topic_id, row in topics.items():
+        if topic_id in relevant:
+            grouped.setdefault(positive_labels[topic_id], []).append((topic_id, row))
+
+    total = sum(int(row["dominant_review_count"]) for row in topics.values())
+    quality_example = None
+    if 8 in relevant and POSITIVE_ASSIGNMENTS.exists():
+        with POSITIVE_ASSIGNMENTS.open(encoding="utf-8-sig", newline="") as source:
+            candidates = [
+                row for row in csv.DictReader(source)
+                if row["dominant_topic_id"] == "8"
+                and re.search(r"qualidade", row["review_text"], re.I)
+            ]
+        if candidates:
+            quality_example = max(
+                candidates, key=lambda row: float(row["dominant_topic_weight"])
+            )
+
+    lines = [
+        "Análise NMF de avaliações com nota 4 ou 5 e termos após o pré-processamento. "
+        "Cada avaliação desse grupo foi atribuída a um tópico dominante. Os rótulos "
+        "são interpretações provisórias e as contagens não equivalem a uma marcação "
+        "manual exata de menções. Percentuais usam como denominador as "
+        f"{total:,} avaliações com termos após o pré-processamento."
+    ]
+    sorted_groups = sorted(
+        grouped.items(),
+        key=lambda item: sum(
+            int(row["dominant_review_count"]) for _, row in item[1]
+        ),
+        reverse=True,
+    )
+    for label, entries in sorted_groups:
+        count = sum(int(row["dominant_review_count"]) for _, row in entries)
+        lines.append(f"\nTema: {label} — {count:,} avaliações ({count / total:.1%}).")
+        for topic_id, row in entries:
+            example_id = row["example_review_id"]
+            example_text = row["example_review_text"]
+            if topic_id == 8 and quality_example:
+                example_id = quality_example["review_id"]
+                example_text = quality_example["review_text"]
+            lines.append(
+                f"Exemplo representativo do tópico {topic_id}, "
+                f"review_id {example_id}: {example_text}"
+            )
+    return "\n".join(lines)
 
 def relevant_topic_ids(question):
     q = normalized(question)
@@ -126,15 +228,25 @@ def main():
         "nome do cliente", "endereco do cliente", "telefone do cliente",
         "cpf", "quem escreveu", "quem fez a avaliacao",
     ))
-    use_topics = needs_topics(args.question) and not asks_for_unavailable_identity
-    analysis = load_topic_analysis(args.question) if use_topics else None
+    positive_mode = asks_positive(args.question) and not asks_for_unavailable_identity
+    use_topics = (
+        needs_topics(args.question)
+        and not asks_for_unavailable_identity
+        and not positive_mode
+    )
+    if positive_mode:
+        analysis = load_positive_topic_analysis(args.question)
+    else:
+        analysis = load_topic_analysis(args.question) if use_topics else None
     store = Chroma(
         collection_name=COLLECTION,
         persist_directory=str(VECTOR_DIR),
         embedding_function=OllamaEmbeddings(model=EMBEDDING_MODEL),
     )
     search = {"k": args.top_k}
-    if use_topics:
+    if positive_mode:
+        search["filter"] = {"review_score": {"$gte": 4}}
+    elif use_topics:
         search["filter"] = {"review_score": {"$lte": 2}}
     candidates = store.similarity_search_with_score(args.question, **search)
     scored_docs = [
@@ -169,14 +281,16 @@ def main():
     if analysis:
         aggregate = "\n\nAnálise NMF e exemplos representativos:\n" + analysis
         instruction = (
-            "Apresente todas as categorias da análise NMF relacionadas à pergunta, "
-            "sem omitir nenhuma, em ordem decrescente de contagem. Para cada uma, "
-            "informe contagem, percentual e cite o review_id do exemplo representativo "
-            "daquela categoria. Em seguida, resuma o tema de maior frequência. "
-            "Esclareça que são avaliações com nota 1 ou 2, cada avaliação foi contada "
-            "em um tópico dominante, os rótulos são provisórios e as contagens não "
-            "são menções exatas nem representam toda a base. As fontes recuperadas "
-            "são exemplos adicionais."
+            "Responda diretamente à pergunta em 2 a 4 frases naturais. Sintetize os "
+            "principais temas concretos e explique o que os clientes relatam; não "
+            "repita a lista inteira de tópicos. Não reproduza contagens, percentuais "
+            "nem review_ids: o programa apresenta esses dados em uma seção separada, "
+            "com os valores e identificadores exatos. Em avaliações negativas, não "
+            "trate o tópico amplo 'insatisfação e recomendação em avaliações mistas' "
+            "como um problema específico; só mencione problemas concretos apoiados "
+            "pelos comentários. Deixe claro que a análise considera notas 1–2 ou 4–5, "
+            "conforme os exemplos, e que os temas são estimativas NMF com rótulos "
+            "provisórios, não contagens exatas de menções."
         )
     else:
         aggregate = ""
@@ -200,13 +314,12 @@ Fontes recuperadas por similaridade ({len(docs)} avaliações):
 
 Resposta:"""
     response = ChatOllama(model=CHAT_MODEL, temperature=0).invoke(prompt)
+    answer = remove_review_ids(response.content)
     print(f"Pergunta: {args.question}\n")
+    print(f"Resposta ({CHAT_MODEL}):\n{answer}\n")
     if analysis:
-        print("Resultado quantitativo da análise NMF (estimativas):")
+        print("Detalhamento quantitativo da análise NMF (estimativas e exemplos):")
         print(analysis + "\n")
-        print(f"Explicação gerada pelo modelo ({CHAT_MODEL}):\n{response.content}\n")
-    else:
-        print(f"Resposta ({CHAT_MODEL}):\n{response.content}\n")
     print(f"Fontes recuperadas por similaridade (distância <= {args.max_distance:.2f}):")
     if not scored_docs:
         print("   Nenhuma; foram usados os exemplos representativos da análise NMF.")
