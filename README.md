@@ -25,14 +25,27 @@ flowchart TD
     D --> H[Documentos LangChain]
     H --> I[Embeddings Ollama]
     I --> J[Chroma persistente]
-    K[Pergunta única ou modo interativo no terminal] --> L[Embedding da pergunta]
+    K[Pergunta única ou modo interativo no terminal] --> S{Intenção e escopo}
+    S -->|fora do escopo| X[Abstenção determinística]
+    S --> L[Embedding da pergunta e consultas NMF derivadas]
     L --> J
-    J --> M[Top-k avaliações e metadados]
+    J --> M[Top-k avaliações dentro do limite de distância]
+    M -->|nenhuma fonte e sem NMF| X
     G --> N[Contagens e exemplos NMF]
     M --> O[Prompt com fontes]
     N --> O
     O --> P[Resposta local Qwen3]
+    P --> V[Validação das referências e evidências citadas]
 ```
+
+### Fluxo de uma pergunta
+
+1. **Processamento da pergunta:** indicadores textuais identificam a intenção (reclamações, elogios, causa, dados pessoais). Perguntas temáticas passam por um classificador de escopo com o Qwen3; perguntas de outro domínio recebem abstenção imediata.
+2. **Transformação:** perguntas temáticas são expandidas com consultas derivadas dos temas NMF relevantes, e a faixa de nota vira filtro (1–2 para insatisfação, 4–5 para elogios).
+3. **Representação vetorial:** a pergunta e as consultas derivadas são convertidas em embeddings com `qwen3-embedding:0.6b`.
+4. **Recuperação e seleção:** o Chroma retorna as avaliações mais próximas; fontes acima da distância 0,80 são descartadas, duplicatas são removidas e os resultados das consultas são intercalados (round-robin) até o top-k.
+5. **Construção do contexto:** as fontes numeradas (`[Fonte n]`) e os exemplos NMF numerados (`[NMF n]`) são enviados ao modelo com instruções de fundamentação.
+6. **Geração e validação:** o `qwen3:4b` gera a síntese; o programa remove referências inexistentes e frases factuais sem citação, e exibe os `review_id` das evidências citadas.
 
 ## Tecnologias
 
@@ -40,10 +53,19 @@ flowchart TD
 - KaggleHub para obter o dataset
 - scikit-learn para TF-IDF, similaridade e NMF
 - Sentence Transformers com `paraphrase-multilingual-MiniLM-L12-v2` como referência de busca semântica
-- LangChain para integração de modelos, documentos e base vetorial
+- LangChain para integração de modelos, documentos e base vetorial (versões diretas fixadas em `requirements.txt`)
 - Ollama com `qwen3-embedding:0.6b` e `qwen3:4b`
 - Chroma para armazenamento e recuperação vetorial
 - NLTK e Gensim para stopwords em português e coerência c_v dos tópicos
+
+## Decisões técnicas
+
+- **Qwen3 4B:** modelo local disponível pelo Ollama, sem chave de API e adequado ao hardware usado no desenvolvimento. Um modelo pequeno pode produzir respostas menos consistentes; por isso, o pipeline limita o contexto, valida referências e exibe as evidências.
+- **Qwen3 Embedding 0.6B:** gera localmente vetores para documentos e perguntas com o mesmo modelo, mantendo a busca semântica reproduzível no ambiente configurado.
+- **Chroma:** persiste o índice localmente e permite recuperar documentos junto de metadados e filtros de nota.
+- **Top-k 5:** limite inicial para mostrar um conjunto pequeno de comentários por pergunta e manter o contexto do modelo manejável; não é uma exigência do desafio nem um valor universal.
+- **Distância máxima 0,80:** corte heurístico aplicado às distâncias Chroma (menor significa mais próximo), ajustado por inspeção de consultas de exemplo. Não foi calibrado como limiar estatístico e pode rejeitar perguntas válidas quando a recuperação direta é fraca; a expansão NMF tenta acrescentar buscas temáticas sem remover esse corte.
+- **Dependências:** `requirements.txt` fixa as versões diretas usadas no ambiente atual, incluindo scikit-learn, cuja versão pode alterar a ordem dos tópicos NMF e invalidar rótulos fixos.
 
 ## Estrutura do projeto
 
@@ -79,6 +101,8 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python -m nltk.downloader stopwords
 ```
+
+Em Linux ou macOS, ative o ambiente com `source .venv/bin/activate` e use `python` no lugar de `.\.venv\Scripts\python.exe` nos comandos abaixo.
 
 O projeto foi desenvolvido usando Python 3.13.12. Se a política do PowerShell impedir a ativação do ambiente virtual, execute os scripts com o caminho completo do interpretador: .\.venv\Scripts\python.exe.
 
@@ -169,17 +193,19 @@ O programa aguarda uma pergunta em `Pergunta>`, responde em seções separadas d
 
 Por padrão, a saída apresenta uma síntese em linguagem natural e somente as evidências citadas nela. Use `--verbose` para imprimir as consultas transformadas, a análise NMF completa, o mapeamento completo dos exemplos e todas as fontes recuperadas.
 
-A recuperação sempre tenta a pergunta original no Chroma. Perguntas temáticas amplas, por exemplo: sobre frequência, padrões, reclamações, insatisfação ou evidências, também podem acionar a análise NMF e buscas derivadas dos temas relevantes e de comentários representativos. Esse encaminhamento usa indicadores textuais de intenção; não é uma lista fechada de perguntas, mas paráfrases que não acionem esses indicadores podem depender somente da busca semântica original. Para reclamações e padrões de insatisfação, são usadas avaliações com notas 1–2; para elogios, notas 4–5. Quando a pergunta combina vários assuntos, a seleção NMF reúne os tópicos correspondentes em vez de deixar um assunto substituir os demais. Para perguntas temáticas que também mencionem atendimento, resposta ou contato, o Chroma inclui uma consulta adicional sobre suporte ao cliente. Quando aplicável, filtra por nota, remove duplicatas por `review_id` e seleciona os resultados das consultas em rodízio para diversificar o contexto.
+A recuperação sempre tenta a pergunta original no Chroma. Antes de expandir uma pergunta temática ou positiva com consultas NMF, o Qwen3 classifica se ela pertence ao escopo das avaliações de compras da Olist. Perguntas explicitamente sobre outro domínio recebem uma abstenção determinística; pedidos gerais sobre padrões e evidências dos comentários são tratados como perguntas sobre a base. Se o classificador não retornar um JSON válido, uma regra de palavras-chave decide o escopo: domínios externos conhecidos são recusados e termos típicos de avaliações (pedido, entrega, produto, reclamação etc.) são aceitos. Se nem essa regra decidir, a busca usa somente a pergunta original, sem expansão NMF.
 
-A resposta deve tratar cada assunto citado na pergunta com evidências correspondentes e usar aspas somente para reproduzir trechos literais. Ela cita comentários recuperados como `[Fonte n]` e exemplos NMF como `[NMF n]`. No modo padrão, o programa mostra os `review_id` e comentários correspondentes às referências citadas; `--verbose` mostra o mapeamento completo. Frases sem referências válidas são removidas. A distância máxima padrão é 0,80 e funciona como um limite heurístico: se nenhuma fonte passar pelo limite e não houver análise NMF aplicável, o sistema se abstém. Fontes próximas são exemplos, não uma amostra estatística da base; a pertinência das citações ainda requer inspeção humana.
+Perguntas temáticas amplas. Por exemplo: sobre frequência, padrões, reclamações, insatisfação ou evidências, podem acionar a análise NMF e buscas derivadas dos temas relevantes e de comentários representativos. Esse encaminhamento combina os temas correspondentes quando a pergunta aborda vários assuntos. Reclamações e padrões de insatisfação, usam avaliações com notas 1–2; elogios, notas 4–5. Menções a atendimento, resposta ou contato adicionam uma consulta sobre suporte ao cliente. Quando aplicável, o Chroma filtra por nota, remove duplicatas por `review_id` e seleciona os resultados das consultas em rodízio para diversificar o contexto. Perguntas que mencionam entrega rápida são roteadas para os temas positivos, a menos que o texto indique negação.
+
+A resposta deve tratar cada assunto citado na pergunta com evidências correspondentes e usar aspas somente para reproduzir trechos literais. O modelo roda com `reasoning=False`; o programa também remove qualquer bloco `<think>` que apareça. A síntese cita comentários recuperados como `[Fonte n]` e exemplos NMF como `[NMF n]`. Frases factuais sem referências válidas são removidas, mas frases explícitas de insuficiência são preservadas mesmo sem citação. No modo padrão, o programa mostra os `review_id` e comentários correspondentes às referências citadas; `--verbose` mostra o mapeamento completo. A distância máxima padrão é 0,80 e funciona como limite heurístico: se nenhuma fonte passar pelo limite e não houver análise NMF aplicável, o sistema se abstém. Fontes próximas são exemplos, não uma amostra estatística da base; a pertinência das citações ainda requer inspeção humana.
 
 ## Estratégia de dados e preparação
 
 - **Seleção:** avaliações com título ou comentário preenchido; linhas sem ambos são descartadas.
 - **Duplicatas:** foram encontrados 307 `review_id` repetidos, totalizando 317 linhas excedentes. Os registros repetidos tinham mesmo texto, nota e datas, mas `order_id` diferente. Para contar uma avaliação textual uma vez, o preparo mantém a última linha de cada `review_id`.
-- **Texto:** espaços externos são removidos. Título e comentário originais são preservados e combinados em `retrieval_text` com rótulos para distinguir cada campo.
+- **Texto:** espaços externos são removidos. Título e comentário originais são preservados e combinados em `retrieval_text` com rótulos para distinguir cada campo. Não removemos comentários curtos ou normalizamos o texto exibido, para preservar a evidência tal como foi escrita; isso pode manter ruídos e quebras internas.
 - **Valores ausentes:** título e comentário vazios são tratados como texto vazio; a linha só é removida quando ambos estão vazios.
-- **Metadados:** `review_id`, `order_id`, nota e datas são preservados para consultar e apresentar as fontes.
+- **Metadados:** `review_id`, `order_id`, nota e datas são preservados. A nota é usada como filtro nas análises de elogios e insatisfação; datas e `order_id` ficam disponíveis para rastreabilidade, mas não são filtros nesta versão. Categoria de produto e atributos de entrega adicionais não foram integrados ao RAG, então o desafio extra está implementado parcialmente.
 - **Embeddings:** `qwen3-embedding:0.6b` gera vetores localmente para documentos e perguntas.
 - **Armazenamento:** Chroma persiste vetores e metadados localmente. A pasta `data/` não é enviada ao GitHub.
 
@@ -215,9 +241,70 @@ Foram executadas consultas de exemplo para conferir evidências, escopo e absten
 | “Existem padrões recorrentes nas avaliações sobre qualidade dos produtos?” | Restringe a análise NMF ao tópico com evidências diretas de defeito, peça faltando ou produto divergente. |
 | “Qual transportadora causou o atraso?” | Não confirma uma causa com base em relatos; apresenta os comentários como percepções dos clientes. |
 | “Qual é a capital da França?” | Informa que não há evidência suficiente na base para responder. |
+| “Quais padrões existem no mercado de ações brasileiro?” | Classifica a pergunta fora do escopo da base Olist e se abstém antes da expansão NMF. |
+| “O que os críticos elogiam no filme Oppenheimer?” | Classifica a pergunta fora do escopo e se abstém; o elogio não aciona a análise NMF positiva. |
+| “Quais evidências sustentam que a entrega é rápida?” | Reconhece a formulação positiva e seleciona temas de entrega para notas 4–5. |
 | “Qual o nome e endereço do cliente que escreveu as reclamações?” | Informa que não há evidência suficiente; dados de identidade e endereço não são parte do contexto indexado. |
 
 O limite de distância 0,80 é um controle heurístico inicial, não uma avaliação estatística completa. Perguntas amplas podem depender da análise NMF e das consultas temáticas; a detecção de intenção é baseada em indicadores textuais e pode exigir ajustes quando uma paráfrase não ativa a análise temática.
+
+## Exemplos de perguntas e respostas
+
+Saídas reais do `ask_rag.py` no modo padrão, que mostra a síntese e somente as evidências citadas. Com `--verbose`, a saída inclui também as consultas derivadas, a distribuição NMF completa e todas as fontes recuperadas.
+
+**Padrões de insatisfação**
+
+```text
+Pergunta> Quais problemas são relatados por clientes insatisfeitos?
+
+========================================================================
+RESPOSTA | qwen3:4b
+Entre os temas identificados estão não recebido / não chegou [NMF 1] e pedido incompleto (faltam itens) [NMF 2]. Os comentários incluem “Não recebi” [NMF 1] e “Comprei dois produtos e recebi apenas um” [NMF 2].
+
+EVIDÊNCIAS CITADAS
+- Exemplo NMF 1 | review_id 515f9b87972d61cb787cc44fa41eeddb: Não recebi
+- Exemplo NMF 2 | review_id 7791b069b631653faff166a056ca7ec2: Comprei dois produtos e recebi apenas um
+========================================================================
+```
+
+**Tema específico: qualidade dos produtos**
+
+```text
+Pergunta> Existem padrões recorrentes nas avaliações relacionadas à qualidade dos produtos?
+
+========================================================================
+RESPOSTA | qwen3:4b
+Entre os temas identificados estão produto com defeito, peça faltando ou produto divergente [NMF 1] e produto não recebido ou produto diferente [NMF 2]. Os comentários incluem “O produto veio com defeito !” [NMF 1] e “Produto erredo Recebi o produto erredo” [NMF 2].
+
+EVIDÊNCIAS CITADAS
+- Exemplo NMF 1 | review_id f91978f4a01c8e97897adb8f282833c5: O produto veio com defeito !
+- Exemplo NMF 2 | review_id ad844b27d07c66f6443ab62db7c0d37c: Produto erredo Recebi o produto erredo
+========================================================================
+```
+
+**Pergunta fora do escopo**
+
+```text
+Pergunta> Porquê chinchilas não dominaram o mundo?
+
+========================================================================
+RESPOSTA
+Este assistente responde perguntas sobre avaliações de compras da Olist. A pergunta apresentada está fora desse escopo.
+========================================================================
+```
+
+**Sem evidência suficiente**
+
+```text
+Pergunta> Qual é a capital da França?
+
+========================================================================
+RESPOSTA
+Nenhuma fonte ficou dentro do limite de distância 0.80. Não há evidência suficiente para responder.
+========================================================================
+```
+
+Os `review_id` exibidos permitem localizar cada avaliação no CSV original e conferir se a síntese corresponde ao que o cliente escreveu.
 
 ## Avaliação da recuperação semântica
 
@@ -237,6 +324,7 @@ Para cada consulta, classifique os comentários recuperados no arquivo `evaluati
 - A busca Top-k recupera exemplos por similaridade e não pode, sozinha, determinar prevalência global.
 - NMF é não supervisionado: tópicos e rótulos podem misturar assuntos e exigem inspeção humana.
 - As frequências reportadas pelo NMF são atribuições de tópico dominante, não contagem exata de frases ou menções.
+- O classificador de escopo bloqueia perguntas de outros domínios, mas não perguntas dentro do domínio sobre assuntos ausentes da base (por exemplo, pagamento via PIX, que não existia no período dos dados). Nesses casos, a expansão NMF pode recuperar avaliações de temas gerais; as evidências exibidas permitem perceber que não tratam do assunto perguntado.
 - As respostas são geradas por um modelo local pequeno; confira se cada afirmação está apoiada pelas avaliações e IDs exibidos.
 - O pipeline evita inferir causas ou responsáveis a partir de comentários que apenas relatam um problema. Como as avaliações são relatos dos clientes, atribuições de causa são opiniões dos autores, não confirmação independente. Perguntas que pedem a causa ou o motivo exato recebem uma abstenção determinística, com os comentários recuperados apresentados como relatos. Perguntas sobre o que os clientes acreditam preservam expressões de incerteza como “acredito” ou “penso”. Para outras perguntas, a geração continua sujeita à aderência do modelo às instruções e as fontes devem ser conferidas.
 
