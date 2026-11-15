@@ -207,8 +207,49 @@ def load_topic_analysis(question):
     return "\n".join(lines)
 
 
+def remove_invalid_evidence_refs(text, source_count, nmf_count):
+    def keep_valid(match):
+        kind, number_text = match.groups()
+        number = int(number_text)
+        limit = source_count if kind.lower() == "fonte" else nmf_count
+        return match.group(0) if 1 <= number <= limit else ""
+
+    return re.sub(r"\[(Fonte|NMF)\s+(\d+)\]", keep_valid, text, flags=re.I)
+
+
+def retain_cited_sentences(text):
+    # Repair missing spaces between model-generated sentences before filtering.
+    text = re.sub(r"([.!?])(?=[A-ZÁÉÍÓÚÂÊÔÃÕÇ])", r"\1 ", text)
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", text.strip())
+    cited = [
+        sentence.strip()
+        for sentence in sentences
+        if re.search(r"\[(?:Fonte|NMF)\s+\d+\]", sentence, re.I)
+    ]
+    return " ".join(cited)
+
+
+def soften_evidence_language(text):
+    endings = {"o": "o", "a": "a", "os": "os", "as": "as"}
+
+    def replace_proven(match):
+        ending = match.group(1).lower()
+        replacement = "ilustrad" + endings[ending] + " por"
+        if match.group(0)[0].isupper():
+            replacement = replacement[0].upper() + replacement[1:]
+        return replacement
+
+    return re.sub(
+        r"\bcomprovad([oa]s?)\s+por\b",
+        replace_proven,
+        text,
+        flags=re.I,
+    )
+
+
+
 def build_topic_context(analysis, positive_mode, max_topics=4):
-    """Condensa os resultados NMF para fornecer contexto temático focado ao LLM."""
+    """Condensa temas NMF e os numera para permitir citações verificáveis."""
     if not analysis:
         return ""
 
@@ -224,32 +265,35 @@ def build_topic_context(analysis, positive_mode, max_topics=4):
             continue
 
         example_match = re.search(
-            r"Exemplo representativo do tópico \d+, review_id [0-9a-f]+: (.*?)(?=\nExemplo representativo|\Z)",
+            r"Exemplo representativo do tópico \d+, review_id ([0-9a-f]+): (.*?)(?=\nExemplo representativo|\Z)",
             details,
             re.S | re.I,
         )
-        example = " ".join(example_match.group(1).split()) if example_match else ""
+        example_id = example_match.group(1) if example_match else ""
+        example = " ".join(example_match.group(2).split()) if example_match else ""
         topics.append({
             "label": label,
             "count": int(count_text.replace(",", "")),
             "percent": percent_text,
+            "example_id": example_id,
             "example": example,
         })
 
     topics.sort(key=lambda topic: topic["count"], reverse=True)
     score_range = "4 ou 5" if positive_mode else "1 ou 2"
     lines = [
-        f"Temas estimados por NMF em avaliações com nota {score_range}, apresentados "
-        "em ordem decrescente de contagem estimada. Cada avaliação foi atribuída a "
-        "um tópico dominante; os rótulos são provisórios. Os exemplos são comentários "
-        "representativos, não evidência de frequência exata."
+        f"Temas NMF estimados em avaliações com nota {score_range}, em ordem "
+        "decrescente de contagem. Cada avaliação foi atribuída a um tópico dominante; "
+        "os rótulos são provisórios e os comentários são exemplos representativos. "
+        "Use [NMF n] para citar o exemplo numerado correspondente."
     ]
-    for topic in topics[:max_topics]:
-        lines.append(f"Tema: {topic['label']}.")
+    for number, topic in enumerate(topics[:max_topics], start=1):
+        lines.append(f"Tema NMF {number}: {topic['label']}.")
         if topic["example"]:
-            lines.append(f"Comentário representativo: {topic['example']}")
+            lines.append(
+                f"Exemplo NMF {number} | review_id {topic['example_id']}: {topic['example']}"
+            )
     return "\n".join(lines)
-
 
 def build_topic_search_queries(analysis, positive_mode, max_topics=4):
     """Transforma a pergunta em buscas curtas baseadas nos temas NMF selecionados."""
@@ -257,14 +301,13 @@ def build_topic_search_queries(analysis, positive_mode, max_topics=4):
     queries = []
     current_topic = None
     for line in topic_context.splitlines():
-        if line.startswith("Tema: "):
-            current_topic = line[len("Tema: "):].rstrip(".")
-        elif line.startswith("Comentário representativo: ") and current_topic:
-            example = line[len("Comentário representativo: "):]
+        if line.startswith("Tema NMF "):
+            current_topic = line.split(": ", 1)[1].rstrip(".")
+        elif line.startswith("Exemplo NMF ") and current_topic:
+            example = line.split(": ", 1)[1]
             queries.append(f"{current_topic}. {example}")
             current_topic = None
     return list(dict.fromkeys(queries))
-
 
 def main():
     parser = argparse.ArgumentParser(description="Responde usando avaliações da Olist.")
@@ -358,7 +401,7 @@ def main():
     for i, (doc, distance) in enumerate(scored_docs, 1):
         meta = doc.metadata
         sources.append(
-            f"Fonte recuperada {i} | distância: {distance:.4f} "
+            f"Fonte {i} | distância: {distance:.4f} "
             f"| review_id: {meta.get('review_id')} | nota: "
             f"{meta.get('review_score')} | data: {meta.get('review_creation_date')}\n"
             f"{doc.page_content}"
@@ -382,25 +425,33 @@ def main():
             "porque ele não apareceu entre as fontes recuperadas. Sintetize os temas "
             "concretos mais relevantes sem repetir a lista inteira. Não reproduza "
             "contagens, percentuais nem review_ids: o programa apresenta esses dados "
-            "em uma seção separada, com valores e identificadores exatos. Em avaliações "
-            "negativas, não trate o tópico amplo 'insatisfação e recomendação em "
-            "avaliações mistas' como um problema específico. Deixe claro que os temas "
-            "são estimativas NMF, com rótulos provisórios, e não contagens exatas de "
-            "menções."
+            "em uma seção separada, com valores e identificadores exatos. Cite cada "
+            "afirmação factual com [Fonte n] quando apoiada por comentário Chroma ou "
+            "[NMF n] quando apoiada por exemplo NMF; use somente números de referência "
+            "presentes no contexto. Em avaliações negativas, não trate o tópico amplo "
+            "'insatisfação e recomendação em avaliações mistas' como um problema "
+            "específico. Não amplie a descrição de um comentário além do problema "
+            "que ele relata claramente, mesmo quando o rótulo NMF agrupa problemas "
+            "alternativos. Descreva os exemplos como ilustrações; não diga que poucos "
+            "comentários provam ou confirmam a frequência geral de um tema. Prefira "
+            "termos como 'indica' ou 'ilustra'. Deixe claro que os temas são estimativas "
+            "NMF, com rótulos provisórios, e não contagens exatas de menções."
         )
     else:
         aggregate = ""
         instruction = (
             "As fontes recuperadas são exemplos próximos da pergunta, não a base "
             "inteira nem amostra estatística. Sem contagens globais, não afirme "
-            "frequência ou prevalência; descreva apenas os exemplos."
+            "frequência ou prevalência; descreva apenas os exemplos. Cite cada "
+            "afirmação factual com [Fonte n], usando somente referências válidas do "
+            "contexto."
         )
 
     prompt = f"""Você analisa avaliações de clientes de comércio eletrônico.
 Responda em português e use somente informações do contexto.
 {instruction}
 Não invente causas ou detalhes. Se faltar evidência, diga isso.
-Ao citar uma avaliação, copie seu review_id exatamente.
+Não escreva review_ids na resposta: use apenas as referências [Fonte n] e [NMF n].
 
 Pergunta: {args.question}
 {aggregate}
@@ -411,6 +462,12 @@ Fontes recuperadas por similaridade ({len(docs)} avaliações):
 Resposta:"""
     response = ChatOllama(model=CHAT_MODEL, temperature=0).invoke(prompt)
     answer = remove_review_ids(response.content)
+    nmf_reference_count = len(re.findall(r"^Exemplo NMF \d+ \|", model_analysis, re.M)) if analysis else 0
+    answer = remove_invalid_evidence_refs(answer, len(docs), nmf_reference_count)
+    answer = soften_evidence_language(answer)
+    answer = retain_cited_sentences(answer)
+    if not answer:
+        answer = "A resposta gerada não trouxe referências válidas. Consulte as evidências detalhadas abaixo."
     print(f"Pergunta: {args.question}\n")
     if len(search_queries) > 1:
         print("Consultas usadas na recuperação:")
@@ -421,6 +478,11 @@ Resposta:"""
     if analysis:
         print("Detalhamento quantitativo da análise NMF (estimativas e exemplos):")
         print(analysis + "\n")
+        print("Mapeamento das referências [NMF n]:")
+        for line in model_analysis.splitlines():
+            if line.startswith("Exemplo NMF "):
+                print(line)
+        print()
     print(f"Fontes recuperadas por similaridade (distância <= {args.max_distance:.2f}):")
     if not scored_docs:
         print("   Nenhuma; foram usados os exemplos representativos da análise NMF.")
