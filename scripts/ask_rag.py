@@ -55,6 +55,14 @@ def asks_positive(question):
     ))
 
 
+def asks_exact_cause(question):
+    q = normalized(question)
+    return any(phrase in q for phrase in (
+        "causa exata", "causa real", "motivo exato", "motivo real",
+        "qual foi a causa", "qual a causa", "qual foi o motivo", "qual o motivo",
+    ))
+
+
 def relevant_positive_topic_ids(question):
     q = normalized(question)
     if any(term in q for term in ("entrega", "prazo", "rapida", "rapido", "pontual")):
@@ -450,7 +458,7 @@ def main():
     prompt = f"""Você analisa avaliações de clientes de comércio eletrônico.
 Responda em português e use somente informações do contexto.
 {instruction}
-Não invente causas ou detalhes. Se faltar evidência, diga isso.
+Não invente causas ou detalhes. Avaliações são relatos e opiniões de clientes, não confirmação independente dos fatos. Se a pergunta pedir causa, motivo ou responsável, atribua cada explicação ao comentário que a relata; não apresente uma percepção individual como causa confirmada nem generalize uma causa única. Preserve marcas de incerteza do comentário, como “acredito”, “penso” ou “não sei”. Um comentário que relata atraso ou defeito, sem explicar sua causa, não permite inferir o motivo. Se as fontes não trouxerem uma explicação explícita, diga que as evidências recuperadas são insuficientes; não transforme ausência de evidência em afirmação absoluta sobre toda a base.
 Não escreva review_ids na resposta: use apenas as referências [Fonte n] e [NMF n].
 
 Pergunta: {args.question}
@@ -460,14 +468,22 @@ Fontes recuperadas por similaridade ({len(docs)} avaliações):
 {context}
 
 Resposta:"""
-    response = ChatOllama(model=CHAT_MODEL, temperature=0).invoke(prompt)
-    answer = remove_review_ids(response.content)
-    nmf_reference_count = len(re.findall(r"^Exemplo NMF \d+ \|", model_analysis, re.M)) if analysis else 0
-    answer = remove_invalid_evidence_refs(answer, len(docs), nmf_reference_count)
-    answer = soften_evidence_language(answer)
-    answer = retain_cited_sentences(answer)
-    if not answer:
-        answer = "A resposta gerada não trouxe referências válidas. Consulte as evidências detalhadas abaixo."
+    if asks_exact_cause(args.question):
+        source_refs = " ".join(f"[Fonte {number}]" for number in range(1, len(docs) + 1))
+        answer = (
+            "Não é possível confirmar uma causa exata a partir destas avaliações. "
+            "Os comentários são relatos e percepções individuais, não uma verificação "
+            f"independente da causa. Consulte os relatos recuperados abaixo. {source_refs}"
+        )
+    else:
+        response = ChatOllama(model=CHAT_MODEL, temperature=0).invoke(prompt)
+        answer = remove_review_ids(response.content)
+        nmf_reference_count = len(re.findall(r"^Exemplo NMF \d+ \|", model_analysis, re.M)) if analysis else 0
+        answer = remove_invalid_evidence_refs(answer, len(docs), nmf_reference_count)
+        answer = soften_evidence_language(answer)
+        answer = retain_cited_sentences(answer)
+        if not answer:
+            answer = "A resposta gerada não trouxe referências válidas. Consulte as evidências detalhadas abaixo."
     print(f"Pergunta: {args.question}\n")
     if len(search_queries) > 1:
         print("Consultas usadas na recuperação:")
