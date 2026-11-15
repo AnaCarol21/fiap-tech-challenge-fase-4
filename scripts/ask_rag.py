@@ -43,8 +43,10 @@ def remove_review_ids(text):
 def needs_topics(question):
     q = normalized(question)
     return any(word in q for word in (
-        "frequenc", "frequent", "principais problema", "mais comum",
-        "mais aparecem", "recorrente", "insatisfeit", "reclamac",
+        "frequenc", "frequent", "padr", "principais problema", "mais comum",
+        "mais aparecem", "recorrente", "insatisfeit", "insatisfac", "reclamac",
+        "motivos de insatisfacao", "motivo de insatisfacao", "evidencia", "insight",
+        "sustentam",
     ))
 
 
@@ -361,22 +363,13 @@ def retrieve_documents(store, question, analysis, positive_mode, use_topics, top
     return search_queries, scored_docs
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Responde usando avaliações da Olist.")
-    parser.add_argument("question", help="Pergunta sobre as avaliações")
-    parser.add_argument("--top-k", type=int, default=5)
-    parser.add_argument(
-        "--max-distance",
-        type=float,
-        default=DEFAULT_MAX_DISTANCE,
-        help="Distância máxima Chroma para aceitar uma fonte (padrão: 0.80)",
+def answer_question(question, top_k, max_distance, store, verbose=False):
+    args = argparse.Namespace(
+        question=question,
+        top_k=top_k,
+        max_distance=max_distance,
+        verbose=verbose,
     )
-    args = parser.parse_args()
-    if args.top_k < 1:
-        parser.error("--top-k precisa ser maior que zero")
-    if args.max_distance <= 0:
-        parser.error("--max-distance precisa ser maior que zero")
-
     question_text = normalized(args.question)
     asks_for_unavailable_identity = any(term in question_text for term in (
         "nome do cliente", "endereco do cliente", "telefone do cliente",
@@ -392,11 +385,6 @@ def main():
         analysis = load_positive_topic_analysis(args.question)
     else:
         analysis = load_topic_analysis(args.question) if use_topics else None
-    store = Chroma(
-        collection_name=COLLECTION,
-        persist_directory=str(VECTOR_DIR),
-        embedding_function=OllamaEmbeddings(model=EMBEDDING_MODEL),
-    )
     search_queries, scored_docs = retrieve_documents(
         store, args.question, analysis, positive_mode, use_topics, args.top_k, args.max_distance
     )
@@ -428,9 +416,16 @@ def main():
         model_analysis = build_topic_context(analysis, positive_mode)
         aggregate = "\n\nContexto temático selecionado para a resposta:\n" + model_analysis
         instruction = (
-            "Responda diretamente à pergunta em 2 a 4 frases naturais. Para perguntas "
-            "gerais sobre principais problemas, padrões ou elogios, use os temas NMF "
-            "como síntese do conjunto: eles estão em ordem decrescente de contagem "
+            "Responda diretamente em português natural, como um analista explicando os "
+            "relatos a uma pessoa. Escreva um parágrafo coeso de 3 a 5 frases, não uma "
+            "lista telegráfica de rótulos. Explique o que os clientes relatam e como os "
+            "temas se relacionam; use citações [Fonte n] ou [NMF n] junto à afirmação. "
+            "Para perguntas "
+            "gerais sobre principais problemas, padrões, elogios ou evidências sem tema "
+            "especificado, use os temas NMF e exemplos recuperados. Se a pergunta não "
+            "identificar qual insight quer verificar, diga isso brevemente e apresente "
+            "padrões como exemplos, sem afirmar que provam um insight específico. "
+            "Use-os como síntese do conjunto: os temas estão em ordem decrescente de contagem "
             "estimada. Os comentários recuperados pelo Chroma são exemplos adicionais "
             "e não uma amostra de prevalência; não conclua que um tema não existe só "
             "porque ele não apareceu entre as fontes recuperadas. Sintetize os temas "
@@ -488,29 +483,106 @@ Resposta:"""
         if not answer:
             answer = "A resposta gerada não trouxe referências válidas. Consulte as evidências detalhadas abaixo."
     print(f"Pergunta: {args.question}\n")
-    if len(search_queries) > 1:
-        print("Consultas usadas na recuperação:")
-        for search_query in search_queries:
-            print(f"- {search_query}")
-        print()
     print(f"Resposta ({CHAT_MODEL}):\n{answer}\n")
-    if analysis:
-        print("Detalhamento quantitativo da análise NMF (estimativas e exemplos):")
-        print(analysis + "\n")
-        print("Mapeamento das referências [NMF n]:")
+
+    cited_sources = {int(number) for number in re.findall(r"\[Fonte (\d+)\]", answer)}
+    cited_nmf = {int(number) for number in re.findall(r"\[NMF (\d+)\]", answer)}
+    print("Evidências citadas na resposta:")
+    printed_evidence = False
+    if analysis and cited_nmf:
         for line in model_analysis.splitlines():
-            if line.startswith("Exemplo NMF "):
+            match = re.match(r"Exemplo NMF (\d+) \|", line)
+            if match and int(match.group(1)) in cited_nmf:
                 print(line)
-        print()
-    print(f"Fontes recuperadas por similaridade (distância <= {args.max_distance:.2f}):")
-    if not scored_docs:
-        print("   Nenhuma; foram usados os exemplos representativos da análise NMF.")
-    for i, (doc, distance) in enumerate(scored_docs, 1):
+                printed_evidence = True
+    for number, (doc, distance) in enumerate(scored_docs, 1):
+        if number not in cited_sources:
+            continue
         meta = doc.metadata
-        print(f"\nFonte {i} | distância: {distance:.4f} "
-              f"| review_id: {meta.get('review_id')} | nota: {meta.get('review_score')} "
-              f"| data: {meta.get('review_creation_date')}")
+        print(
+            f"Fonte {number} | distância: {distance:.4f} | "
+            f"review_id: {meta.get('review_id')} | nota: {meta.get('review_score')} | "
+            f"data: {meta.get('review_creation_date')}"
+        )
         print(f"   {doc.page_content}")
+        printed_evidence = True
+    if not printed_evidence:
+        print("A síntese não citou referências válidas; use --verbose para inspecionar o contexto.")
+
+    if verbose:
+        if len(search_queries) > 1:
+            print("\nConsultas usadas na recuperação:")
+            for search_query in search_queries:
+                print(f"- {search_query}")
+        if analysis:
+            print("\nDetalhamento quantitativo da análise NMF (estimativas e exemplos):")
+            print(analysis)
+            print("\nMapeamento completo das referências [NMF n]:")
+            for line in model_analysis.splitlines():
+                if line.startswith("Exemplo NMF "):
+                    print(line)
+        print(f"\nTodas as fontes recuperadas (distância <= {args.max_distance:.2f}):")
+        if not scored_docs:
+            print("   Nenhuma fonte; foram usados somente exemplos representativos da análise NMF.")
+        for i, (doc, distance) in enumerate(scored_docs, 1):
+            meta = doc.metadata
+            print(
+                f"\nFonte {i} | distância: {distance:.4f} | "
+                f"review_id: {meta.get('review_id')} | nota: {meta.get('review_score')} | "
+                f"data: {meta.get('review_creation_date')}"
+            )
+            print(f"   {doc.page_content}")
+
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Responde usando avaliações da Olist.")
+    parser.add_argument(
+        "question",
+        nargs="?",
+        help="Pergunta sobre as avaliações; omita para abrir o modo interativo",
+    )
+    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Exibe o relatório completo de tópicos NMF e todas as fontes recuperadas",
+    )
+    parser.add_argument(
+        "--max-distance",
+        type=float,
+        default=DEFAULT_MAX_DISTANCE,
+        help="Distância máxima Chroma para aceitar uma fonte (padrão: 0.80)",
+    )
+    args = parser.parse_args()
+    if args.top_k < 1:
+        parser.error("--top-k precisa ser maior que zero")
+    if args.max_distance <= 0:
+        parser.error("--max-distance precisa ser maior que zero")
+
+    store = Chroma(
+        collection_name=COLLECTION,
+        persist_directory=str(VECTOR_DIR),
+        embedding_function=OllamaEmbeddings(model=EMBEDDING_MODEL),
+    )
+    if args.question:
+        answer_question(args.question, args.top_k, args.max_distance, store, args.verbose)
+        return
+
+    print("Assistente de avaliações da Olist")
+    print("Digite sua pergunta. Para encerrar, digite 'sair'.")
+    while True:
+        try:
+            question = input("\nPergunta> ").strip().lstrip("\ufeff")
+        except (EOFError, KeyboardInterrupt):
+            print("\nEncerrando.")
+            break
+        if not question:
+            continue
+        if normalized(question) in {"sair", "exit", "quit"}:
+            print("Encerrando.")
+            break
+        answer_question(question, args.top_k, args.max_distance, store, args.verbose)
 
 
 if __name__ == "__main__":
