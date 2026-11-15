@@ -10,7 +10,7 @@ A aplicação é executada localmente pela linha de comando. O modelo de linguag
 - Comparar uma busca lexical com TF-IDF e buscas semânticas com embeddings.
 - Armazenar avaliações e metadados em uma base vetorial Chroma.
 - Recuperar avaliações relacionadas à pergunta e gerar respostas com evidências.
-- Explorar temas de avaliações com notas baixas usando NMF e TF-IDF.
+- Explorar temas de avaliações com notas baixas (1–2) e positivas (4–5) usando NMF e TF-IDF.
 
 ## Arquitetura
 
@@ -109,6 +109,7 @@ Execute os passos na ordem:
 .\.venv\Scripts\python.exe scripts/explore_reviews.py
 .\.venv\Scripts\python.exe scripts/prepare_reviews.py
 .\.venv\Scripts\python.exe scripts/analyze_topics.py --min-score 1 --max-score 2
+.\.venv\Scripts\python.exe scripts/analyze_topics.py --min-score 4 --max-score 5
 ```
 
 Instale e inicie o Ollama. Baixe os modelos utilizados:
@@ -150,10 +151,10 @@ Busca no índice Chroma:
 Resposta com RAG:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts/ask_rag.py "Quais reclamações relacionadas à entrega aparecem com maior frequência?" --top-k 5
+.\.venv\Scripts\python.exe scripts/ask_rag.py "Quais reclamações relacionadas à entrega aparecem com maior frequência?" --top-k 5 --max-distance 0.80
 ```
 
-O parâmetro `--top-k` controla quantas avaliações semanticamente próximas são recuperadas; o padrão é 5 e pode ser alterado conforme a pergunta. Essas fontes são exemplos relevantes recuperados pela busca, não uma amostra estatística da base.
+O parâmetro `--top-k` controla quantas avaliações semanticamente próximas são consideradas; o padrão é 5. O parâmetro `--max-distance` define o limite máximo da distância Chroma para aceitar uma fonte; o padrão é 0,80 e pode ser ajustado pela linha de comando. Fontes acima do limite são descartadas. Sem fonte próxima e sem uma análise NMF aplicável, o sistema se abstém de responder. As fontes recuperadas são exemplos relevantes, não uma amostra estatística da base.
 
 ## Estratégia de dados e preparação
 
@@ -167,19 +168,34 @@ O parâmetro `--top-k` controla quantas avaliações semanticamente próximas s�
 
 ## Análise de tópicos e contagens
 
-A análise NMF utiliza TF-IDF com unigramas e bigramas. São comparados K = 5, 10, 15, 20 e 30, com coerência c_v como medida auxiliar, erro de reconstrução e inspeção manual de termos e exemplos. Após a deduplicação, K=10 teve a maior coerência c_v entre as configurações comparadas (0,5832); os rótulos seguem sendo interpretações provisórias.
+A análise NMF utiliza TF-IDF com unigramas e bigramas. São comparados K = 5, 10, 15, 20 e 30, com coerência c_v como medida auxiliar, erro de reconstrução e inspeção manual de termos e exemplos. Para avaliações com notas 1–2, K=10 teve a maior coerência c_v entre as configurações comparadas (0,5832). Para notas 4–5, usamos K=10 para manter os resultados comparáveis e permitir uma exploração mais detalhada; nesse subconjunto, K=5 teve c_v ligeiramente maior (0,5500 contra 0,5394 para K=10). Portanto, K=10 para notas 4–5 foi escolhido por comparabilidade e granularidade, não por apresentar a maior coerência nessa execução. Os rótulos seguem sendo interpretações provisórias.
 
 Para avaliações com nota 1 ou 2, o último processamento encontrou 10.861 linhas; 10.829 continham termos após o pré-processamento e receberam tópico dominante. Os percentuais NMF usam essas 10.829 avaliações como denominador. Linhas sem termos não entram nas atribuições.
 
 Nos resultados atuais, os tópicos 0–3 foram agrupados como **“não recebido / não chegou”**. Essa categoria somou 2.657 avaliações (24,5% do conjunto NMF de notas 1–2). O tópico 6, interpretado como atraso ou demora na entrega, somou 1.443 (13,3%). Essas contagens são de avaliações atribuídas a um tópico dominante; não são uma contagem manual exata de todas as menções ao tema. Os rótulos devem ser revisados junto dos termos e exemplos exportados.
 
-Os resultados são gravados em:
+Os resultados são gravados em arquivos separados por faixa de nota:
 
-- `data/processed/nmf_topic_model_selection_score_1_2.csv`
-- `data/processed/nmf_topic_details_score_1_2.csv`
-- `data/processed/nmf_topic_assignments_score_1_2.csv`
+- Notas 1–2: `data/processed/nmf_topic_model_selection_score_1_2.csv`, `data/processed/nmf_topic_details_score_1_2.csv` e `data/processed/nmf_topic_assignments_score_1_2.csv`.
+- Notas 4–5: `data/processed/nmf_topic_model_selection_score_4_5.csv`, `data/processed/nmf_topic_details_score_4_5.csv` e `data/processed/nmf_topic_assignments_score_4_5.csv`.
 
-O RAG carrega as contagens NMF em perguntas sobre reclamações, frequência e padrões. Para esse tipo de pergunta, a recuperação semântica é limitada às notas 1–2. A saída quantitativa aparece separada da explicação do modelo para manter as contagens explícitas. As respostas incluem IDs representativos e as avaliações recuperadas como exemplos adicionais.
+Nas execuções registradas, 10.829 avaliações com notas 1–2 e termos e 27.664 avaliações com notas 4–5 e termos receberam tópico dominante. Em perguntas sobre reclamações, frequência e padrões de insatisfação, o RAG usa a análise das notas 1–2 e restringe a recuperação semântica a essa faixa. Em perguntas sobre elogios, usa a análise das notas 4–5 e restringe a recuperação semântica às avaliações com essas notas. A análise positiva identificou, entre outros temas, comentários positivos sobre produtos (6.591 avaliações; 23,8%), entrega antes do prazo (4.521; 16,3%) e rapidez na entrega (2.505; 9,1%).
+
+As contagens são estimativas de avaliações atribuídas a um único tópico dominante; não representam uma contagem manual exata de menções. Os rótulos são interpretações provisórias e devem ser revisados junto dos termos e exemplos exportados. A saída quantitativa aparece separada da explicação do modelo, e as respostas incluem IDs representativos e avaliações recuperadas como evidências adicionais.
+
+## Verificações manuais de perguntas do desafio
+
+Foram executadas consultas de exemplo para conferir evidências, escopo e abstenção:
+
+| Pergunta | Comportamento observado |
+|---|---|
+| “Quais reclamações relacionadas à entrega aparecem com maior frequência?” | Exibe as contagens NMF para notas 1–2 e os IDs representativos; recupera comentários de entrega dentro do limite de distância. |
+| “O que os clientes mais elogiam nas experiências de compra?” | Exibe estimativas de temas NMF calculadas sobre avaliações com notas 4–5, com exemplos representativos, e apresenta avaliações recuperadas por similaridade como evidências adicionais. |
+| “Existem padrões recorrentes nas avaliações sobre qualidade dos produtos?” | Restringe a análise NMF ao tópico com evidências diretas de defeito, peça faltando ou produto divergente. |
+| “Qual é a capital da França?” | Informa que não há evidência suficiente na base para responder. |
+| “Qual o nome e endereço do cliente que escreveu as reclamações?” | Informa que não há evidência suficiente; dados de identidade e endereço não são parte do contexto indexado. |
+
+O limite de distância 0,80 foi calibrado com essas consultas de referência. É um controle heurístico inicial, não uma avaliação estatística completa. Perguntas relevantes muito amplas podem depender das evidências dos tópicos NMF em vez de fontes próximas retornadas pelo Chroma.
 
 ## Limitações
 
@@ -192,4 +208,4 @@ O RAG carrega as contagens NMF em perguntas sobre reclamações, frequência e p
 
 ## Reprodutibilidade e segurança
 
-O repositório não inclui o dataset, CSVs processados, embeddings em cache, índice Chroma, ambiente virtual nem arquivo `.env`. Esses caminhos estão no `.gitignore`. Para reproduzir o projeto, obtenha os dados, instale os requisitos, prepare os textos, rode a análise NMF, baixe os modelos Ollama e construa o índice conforme as etapas acima. Não publique credenciais do Kaggle nem arquivos de segredo.
+O repositório não inclui o dataset, CSVs processados, embeddings em cache, índice Chroma, ambiente virtual nem arquivo `.env`. Esses caminhos estão no `.gitignore`. Para reproduzir o projeto, obtenha os dados, instale os requisitos, prepare os textos, rode as análises NMF para notas 1–2 e 4–5, baixe os modelos Ollama e construa o índice conforme as etapas acima. Não publique credenciais do Kaggle nem arquivos de segredo.
