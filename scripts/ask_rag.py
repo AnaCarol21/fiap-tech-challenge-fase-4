@@ -239,15 +239,31 @@ def build_topic_context(analysis, positive_mode, max_topics=4):
     topics.sort(key=lambda topic: topic["count"], reverse=True)
     score_range = "4 ou 5" if positive_mode else "1 ou 2"
     lines = [
-        f"Temas estimados por NMF em avaliações com nota {score_range}. "
-        "Cada avaliação foi atribuída a um tópico dominante; os rótulos são provisórios. "
-        "Os exemplos são comentários representativos, não evidência de frequência exata."
+        f"Temas estimados por NMF em avaliações com nota {score_range}, apresentados "
+        "em ordem decrescente de contagem estimada. Cada avaliação foi atribuída a "
+        "um tópico dominante; os rótulos são provisórios. Os exemplos são comentários "
+        "representativos, não evidência de frequência exata."
     ]
     for topic in topics[:max_topics]:
         lines.append(f"Tema: {topic['label']}.")
         if topic["example"]:
             lines.append(f"Comentário representativo: {topic['example']}")
     return "\n".join(lines)
+
+
+def build_topic_search_queries(analysis, positive_mode, max_topics=4):
+    """Transforma a pergunta em buscas curtas baseadas nos temas NMF selecionados."""
+    topic_context = build_topic_context(analysis, positive_mode, max_topics)
+    queries = []
+    current_topic = None
+    for line in topic_context.splitlines():
+        if line.startswith("Tema: "):
+            current_topic = line[len("Tema: "):].rstrip(".")
+        elif line.startswith("Comentário representativo: ") and current_topic:
+            example = line[len("Comentário representativo: "):]
+            queries.append(f"{current_topic}. {example}")
+            current_topic = None
+    return list(dict.fromkeys(queries))
 
 
 def main():
@@ -291,12 +307,45 @@ def main():
         search["filter"] = {"review_score": {"$gte": 4}}
     elif use_topics:
         search["filter"] = {"review_score": {"$lte": 2}}
-    candidates = store.similarity_search_with_score(args.question, **search)
-    scored_docs = [
-        (doc, float(distance))
-        for doc, distance in candidates
-        if float(distance) <= args.max_distance
-    ]
+    search_queries = [args.question]
+    if analysis:
+        search_queries.extend(build_topic_search_queries(analysis, positive_mode))
+    search_queries = list(dict.fromkeys(search_queries))
+
+    candidates_by_query = []
+    for search_query in search_queries:
+        candidates = store.similarity_search_with_score(search_query, **search)
+        best_for_query = {}
+        for doc, distance in candidates:
+            distance = float(distance)
+            if distance > args.max_distance:
+                continue
+            review_id = doc.metadata.get("review_id")
+            if review_id not in best_for_query or distance < best_for_query[review_id][1]:
+                best_for_query[review_id] = (doc, distance)
+        candidates_by_query.append(
+            sorted(best_for_query.values(), key=lambda item: item[1])
+        )
+
+    # Round-robin across the original question and topic searches prevents one
+    # easy-to-match theme from filling the entire context window.
+    scored_docs = []
+    selected_ids = set()
+    max_candidates = max((len(items) for items in candidates_by_query), default=0)
+    for rank in range(max_candidates):
+        for query_candidates in candidates_by_query:
+            if rank >= len(query_candidates):
+                continue
+            doc, distance = query_candidates[rank]
+            review_id = doc.metadata.get("review_id")
+            if review_id in selected_ids:
+                continue
+            selected_ids.add(review_id)
+            scored_docs.append((doc, distance))
+            if len(scored_docs) >= args.top_k:
+                break
+        if len(scored_docs) >= args.top_k:
+            break
     docs = [doc for doc, _ in scored_docs]
     if not docs and not analysis:
         print(
@@ -325,16 +374,19 @@ def main():
         model_analysis = build_topic_context(analysis, positive_mode)
         aggregate = "\n\nContexto temático selecionado para a resposta:\n" + model_analysis
         instruction = (
-            "Responda diretamente à pergunta em 2 a 4 frases naturais. Sintetize os "
-            "principais temas concretos e explique o que os clientes relatam; não "
-            "repita a lista inteira de tópicos. Não reproduza contagens, percentuais "
-            "nem review_ids: o programa apresenta esses dados em uma seção separada, "
-            "com os valores e identificadores exatos. Em avaliações negativas, não "
-            "trate o tópico amplo 'insatisfação e recomendação em avaliações mistas' "
-            "como um problema específico; só mencione problemas concretos apoiados "
-            "pelos comentários. Deixe claro que a análise considera notas 1–2 ou 4–5, "
-            "conforme os exemplos, e que os temas são estimativas NMF com rótulos "
-            "provisórios, não contagens exatas de menções."
+            "Responda diretamente à pergunta em 2 a 4 frases naturais. Para perguntas "
+            "gerais sobre principais problemas, padrões ou elogios, use os temas NMF "
+            "como síntese do conjunto: eles estão em ordem decrescente de contagem "
+            "estimada. Os comentários recuperados pelo Chroma são exemplos adicionais "
+            "e não uma amostra de prevalência; não conclua que um tema não existe só "
+            "porque ele não apareceu entre as fontes recuperadas. Sintetize os temas "
+            "concretos mais relevantes sem repetir a lista inteira. Não reproduza "
+            "contagens, percentuais nem review_ids: o programa apresenta esses dados "
+            "em uma seção separada, com valores e identificadores exatos. Em avaliações "
+            "negativas, não trate o tópico amplo 'insatisfação e recomendação em "
+            "avaliações mistas' como um problema específico. Deixe claro que os temas "
+            "são estimativas NMF, com rótulos provisórios, e não contagens exatas de "
+            "menções."
         )
     else:
         aggregate = ""
@@ -360,6 +412,11 @@ Resposta:"""
     response = ChatOllama(model=CHAT_MODEL, temperature=0).invoke(prompt)
     answer = remove_review_ids(response.content)
     print(f"Pergunta: {args.question}\n")
+    if len(search_queries) > 1:
+        print("Consultas usadas na recuperação:")
+        for search_query in search_queries:
+            print(f"- {search_query}")
+        print()
     print(f"Resposta ({CHAT_MODEL}):\n{answer}\n")
     if analysis:
         print("Detalhamento quantitativo da análise NMF (estimativas e exemplos):")
