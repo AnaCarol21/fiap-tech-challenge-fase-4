@@ -59,7 +59,10 @@ flowchart TD
 │   ├── build_vector_store.py     # Criação incremental do índice Chroma
 │   ├── search_chroma.py          # Busca semântica no índice local
 │   ├── analyze_topics.py         # Comparação de K e atribuições NMF
+│   ├── evaluate_retrieval.py     # Avaliação de recuperação com Recall@k
 │   └── ask_rag.py                # RAG com Qwen3 e fontes
+├── evaluation/
+│   └── retrieval_cases.csv       # Perguntas e IDs de referência
 ├── requirements.txt
 └── README.md
 ```
@@ -156,6 +159,8 @@ Resposta com RAG:
 
 O parâmetro `--top-k` controla quantas avaliações semanticamente próximas são consideradas; o padrão é 5. O parâmetro `--max-distance` define o limite máximo da distância Chroma para aceitar uma fonte; o padrão é 0,80 e pode ser ajustado pela linha de comando. Fontes acima do limite são descartadas. Sem fonte próxima e sem uma análise NMF aplicável, o sistema se abstém de responder. As fontes recuperadas são exemplos relevantes, não uma amostra estatística da base.
 
+Em perguntas gerais que acionam a análise NMF, o pipeline transforma a consulta em buscas específicas para até quatro temas concretos, usando o rótulo e um comentário representativo de cada tema. O Chroma executa a consulta original e as consultas temáticas, aplica o filtro de nota quando pertinente e remove resultados duplicados por `review_id`. A seleção final percorre os resultados de cada consulta em rodízio, para evitar que um único tema ocupe todo o contexto. Os temas NMF orientam a síntese geral; comentários Chroma são evidências adicionais, não uma amostra estatística. A resposta cita comentários recuperados como `[Fonte n]` e exemplos NMF como `[NMF n]`; os números são conferidos contra as referências disponíveis e o mapeamento NMF para `review_id` é exibido abaixo dos resultados. Frases sem referências válidas são removidas da síntese para evitar afirmações sem uma evidência rastreável. A pertinência semântica da referência ainda requer inspeção humana. As consultas usadas são exibidas para tornar essa etapa observável. Perguntas sem análise NMF continuam usando a consulta original.
+
 ## Estratégia de dados e preparação
 
 - **Seleção:** avaliações com título ou comentário preenchido; linhas sem ambos são descartadas.
@@ -197,6 +202,18 @@ Foram executadas consultas de exemplo para conferir evidências, escopo e absten
 
 O limite de distância 0,80 foi calibrado com essas consultas de referência. É um controle heurístico inicial, não uma avaliação estatística completa. Perguntas relevantes muito amplas podem depender das evidências dos tópicos NMF em vez de fontes próximas retornadas pelo Chroma.
 
+## Avaliação da recuperação semântica
+
+O arquivo `evaluation/retrieval_cases.csv` reúne perguntas de referência e IDs de avaliações relevantes revisados manualmente. Com o índice Chroma construído e o Ollama ativo, execute:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/evaluate_retrieval.py --top-k 5 --max-distance 0.80
+```
+
+O script calcula Recall@5: a proporção de IDs relevantes para cada pergunta que aparecem entre os cinco primeiros resultados. Também mostra o Recall@5 após aplicar o limite de distância, para revelar se esse corte está descartando avaliações de referência. Os IDs recuperados e os que faltaram são impressos por pergunta para inspeção.
+
+Esta é uma validação inicial com poucos casos anotados manualmente; não representa uma avaliação estatística de todas as consultas possíveis. O conjunto pode crescer conforme novas perguntas sejam verificadas.
+
 ## Limitações
 
 - A base contém avaliações históricas do dataset Olist; os resultados descrevem somente esse conjunto.
@@ -204,7 +221,9 @@ O limite de distância 0,80 foi calibrado com essas consultas de referência. É
 - NMF é não supervisionado: tópicos e rótulos podem misturar assuntos e exigem inspeção humana.
 - As frequências reportadas pelo NMF são atribuições de tópico dominante, não contagem exata de frases ou menções.
 - As respostas são geradas por um modelo local pequeno; confira se cada afirmação está apoiada pelas avaliações e IDs exibidos.
-- O RAG e o índice rodam localmente pela linha de comando; não há interface web nesta versão.
+- O pipeline evita inferir causas ou responsáveis a partir de comentários que apenas relatam um problema. Como as avaliações são relatos dos clientes, atribuições de causa são opiniões dos autores, não confirmação independente. Perguntas que pedem a causa ou o motivo exato recebem uma abstenção determinística, com os comentários recuperados apresentados como relatos. Perguntas sobre o que os clientes acreditam preservam expressões de incerteza como “acredito” ou “penso”. Para outras perguntas, a geração continua sujeita à aderência do modelo às instruções e as fontes devem ser conferidas.
+
+O RAG e o índice rodam localmente pela linha de comando; não há interface web nesta versão.
 
 ## Reprodutibilidade e segurança
 
